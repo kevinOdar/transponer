@@ -20,17 +20,30 @@ PERFIL_MENOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2
 
 def detectar_tono(ruta):
     y, sr = librosa.load(ruta, sr=None, mono=True)
-    croma = librosa.feature.chroma_cqt(y=y, sr=sr).mean(axis=1)
+    y_armonico = librosa.effects.harmonic(y)
 
-    mejor_score, mejor_idx, mejor_modo = -np.inf, 0, "mayor"
+    # El croma completo capta qué notas suenan, pero el croma del registro
+    # grave capta la raíz real de cada acorde (el bajo), que es la señal más
+    # fiable para distinguir una tonalidad de su dominante (p.ej. DO vs SOL,
+    # que comparten 6 de 7 notas de la escala).
+    croma = librosa.feature.chroma_cqt(y=y_armonico, sr=sr).mean(axis=1)
+    croma_bajo = librosa.feature.chroma_cqt(
+        y=y_armonico, sr=sr, fmin=librosa.note_to_hz("C1"), n_octaves=3
+    ).mean(axis=1)
+    perfil = croma + 1.5 * croma_bajo
+
+    candidatos = []
     for i in range(12):
-        score_mayor = np.corrcoef(np.roll(PERFIL_MAYOR, i), croma)[0, 1]
-        score_menor = np.corrcoef(np.roll(PERFIL_MENOR, i), croma)[0, 1]
-        if score_mayor > mejor_score:
-            mejor_score, mejor_idx, mejor_modo = score_mayor, i, "mayor"
-        if score_menor > mejor_score:
-            mejor_score, mejor_idx, mejor_modo = score_menor, i, "menor"
-    return mejor_idx, mejor_modo
+        candidatos.append((np.corrcoef(np.roll(PERFIL_MAYOR, i), perfil)[0, 1], i, "mayor"))
+        candidatos.append((np.corrcoef(np.roll(PERFIL_MENOR, i), perfil)[0, 1], i, "menor"))
+    candidatos.sort(key=lambda c: c[0], reverse=True)
+
+    _, idx, modo = candidatos[0]
+    alternativa = None
+    score_top, score_2 = candidatos[0][0], candidatos[1][0]
+    if score_top - score_2 < 0.03:
+        alternativa = (candidatos[1][1], candidatos[1][2])
+    return idx, modo, alternativa
 
 
 def transponer_audio(ruta_entrada, semitonos, ruta_salida):
@@ -165,18 +178,19 @@ class App(ttk.Window):
 
     def _detectar_tono(self, ruta):
         try:
-            idx, modo = detectar_tono(ruta)
+            idx, modo, alternativa = detectar_tono(ruta)
         except Exception as exc:
             self.after(0, self._on_error_deteccion, self._describir_error(exc))
         else:
-            self.after(0, self._on_tono_detectado, idx, modo)
+            self.after(0, self._on_tono_detectado, idx, modo, alternativa)
 
-    def _on_tono_detectado(self, idx, modo):
+    def _on_tono_detectado(self, idx, modo, alternativa):
         self.tono_detectado_idx = idx
         self.modo_detectado = modo
-        self.label_tono_detectado.config(
-            text=f"Tono detectado: {NOTAS[idx]} {modo}", bootstyle="success"
-        )
+        texto = f"Tono detectado: {NOTAS[idx]} {modo}"
+        if alternativa:
+            texto += f"\n(no muy seguro, podría ser {NOTAS[alternativa[0]]} {alternativa[1]})"
+        self.label_tono_detectado.config(text=texto, bootstyle="success")
 
     def _on_error_deteccion(self, mensaje):
         self.label_tono_detectado.config(text="No se pudo detectar el tono", bootstyle="danger")
