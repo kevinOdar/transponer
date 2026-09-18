@@ -3,6 +3,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import audioread.exceptions
 import librosa
 import numpy as np
 import soundfile as sf
@@ -148,9 +149,20 @@ class App(tk.Tk):
         try:
             transponer_audio(ruta_entrada, semitonos, ruta_salida)
         except Exception as exc:
-            self.after(0, self._on_error, str(exc))
+            self.after(0, self._on_error, self._describir_error(exc))
         else:
             self.after(0, self._on_exito, ruta_salida)
+
+    @staticmethod
+    def _describir_error(exc):
+        if isinstance(exc, audioread.exceptions.NoBackendError):
+            return (
+                "No se pudo leer este formato de audio.\n\n"
+                "Necesitas tener ffmpeg instalado y en el PATH para leer "
+                "mp3/m4a. Si lo acabas de instalar, reinicia la app."
+            )
+        mensaje = str(exc)
+        return mensaje if mensaje else type(exc).__name__
 
     def _on_exito(self, ruta_salida):
         self.ruta_resultado = ruta_salida
