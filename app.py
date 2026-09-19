@@ -254,10 +254,30 @@ class App(ttk.Window):
         tab_manual = ttk.Frame(self.notebook, padding=16)
         self.notebook.add(tab_manual, text="Manual")
         self.var_semitonos = tk.IntVar(value=0)
+        fila_semitonos = ttk.Frame(tab_manual)
+        fila_semitonos.pack(pady=(2, 8))
+        ttk.Button(
+            fila_semitonos,
+            text="−",
+            width=3,
+            bootstyle="info-outline",
+            command=lambda: self._cambiar_semitonos(-1),
+        ).pack(side="left")
         self.label_semitonos = ttk.Label(
-            tab_manual, text="0 semitonos", font=("Segoe UI", 10, "bold")
+            fila_semitonos,
+            text="0 semitonos",
+            font=("Segoe UI", 11, "bold"),
+            width=14,
+            anchor="center",
         )
-        self.label_semitonos.pack(pady=(2, 6))
+        self.label_semitonos.pack(side="left", padx=12)
+        ttk.Button(
+            fila_semitonos,
+            text="+",
+            width=3,
+            bootstyle="info-outline",
+            command=lambda: self._cambiar_semitonos(1),
+        ).pack(side="left")
         ttk.Scale(
             tab_manual,
             from_=-12,
@@ -318,8 +338,13 @@ class App(ttk.Window):
         )
         self.boton_reproducir.pack(fill="x")
 
-    def _actualizar_label_semitonos(self, _valor):
+    def _actualizar_label_semitonos(self, _valor=None):
         self.label_semitonos.config(text=f"{round(self.var_semitonos.get())} semitonos")
+
+    def _cambiar_semitonos(self, delta):
+        nuevo = max(-12, min(12, round(self.var_semitonos.get()) + delta))
+        self.var_semitonos.set(nuevo)
+        self._actualizar_label_semitonos()
 
     def _elegir_archivo(self):
         ruta = filedialog.askopenfilename(
