@@ -46,6 +46,107 @@ def detectar_tono(ruta):
     return idx, modo, alternativa
 
 
+# Plantillas de acorde: qué grados suenan sobre la fundamental (índice 0).
+TEMPLATE_MAYOR = np.zeros(12)
+TEMPLATE_MAYOR[[0, 4, 7]] = 1  # fundamental, 3ra mayor, 5ta justa
+TEMPLATE_MENOR = np.zeros(12)
+TEMPLATE_MENOR[[0, 3, 7]] = 1  # fundamental, 3ra menor, 5ta justa
+
+
+NUMEROS_EN_PALABRAS = [
+    "cero", "un", "dos", "tres", "cuatro", "cinco", "seis",
+    "siete", "ocho", "nueve", "diez", "once", "doce",
+]
+
+
+def describir_semitonos(semitonos):
+    cantidad = abs(semitonos)
+    palabra = NUMEROS_EN_PALABRAS[cantidad] if cantidad < len(NUMEROS_EN_PALABRAS) else str(cantidad)
+    unidad = "semitono" if cantidad == 1 else "semitonos"
+    sentido = "más" if semitonos > 0 else "menos"
+    return f"{palabra} {unidad} {sentido}"
+
+
+def formatear_tiempo(segundos):
+    minutos, s = divmod(int(segundos), 60)
+    return f"{minutos}:{s:02d}"
+
+
+def _suavizar_moda(etiquetas, ventana=5):
+    n = len(etiquetas)
+    medio = ventana // 2
+    suavizado = []
+    for i in range(n):
+        vecinos = etiquetas[max(0, i - medio) : min(n, i + medio + 1)]
+        conteo = {}
+        for e in vecinos:
+            conteo[e] = conteo.get(e, 0) + 1
+        # ante empate, prioriza mantener la etiqueta actual (evita saltos innecesarios)
+        suavizado.append(max(conteo.items(), key=lambda kv: (kv[1], kv[0] == etiquetas[i]))[0])
+    return suavizado
+
+
+def _fusionar_cambios_breves(segmentos, duracion_total, duracion_minima=3.0):
+    if not segmentos:
+        return segmentos
+    resultado = [segmentos[0]]
+    for i in range(1, len(segmentos)):
+        tiempo, nombre = segmentos[i]
+        siguiente = segmentos[i + 1][0] if i + 1 < len(segmentos) else duracion_total
+        if siguiente - tiempo < duracion_minima or resultado[-1][1] == nombre:
+            continue
+        resultado.append((tiempo, nombre))
+    return resultado
+
+
+def detectar_acordes(ruta, ventana=1.5):
+    y, sr = librosa.load(ruta, sr=None, mono=True)
+    y_armonico = librosa.effects.harmonic(y)
+
+    hop = 512
+    croma = librosa.feature.chroma_cqt(y=y_armonico, sr=sr, hop_length=hop, norm=None)
+    rms = librosa.feature.rms(y=y_armonico, hop_length=hop)[0]
+    umbral = rms.max() * 0.08
+
+    frames_por_bloque = max(1, round(sr / hop * ventana))
+    n_bloques = croma.shape[1] // frames_por_bloque
+
+    tiempos, etiquetas = [], []
+    for b in range(n_bloques):
+        ini, fin = b * frames_por_bloque, (b + 1) * frames_por_bloque
+        tiempos.append(ini * hop / sr)
+        if rms[ini:fin].mean() < umbral:
+            etiquetas.append(None)
+            continue
+
+        vector = croma[:, ini:fin].mean(axis=1)
+        vector = vector / (np.linalg.norm(vector) + 1e-9)
+
+        mejor_score, mejor_nombre = -np.inf, None
+        for i in range(12):
+            score_mayor = np.dot(np.roll(TEMPLATE_MAYOR, i), vector)
+            score_menor = np.dot(np.roll(TEMPLATE_MENOR, i), vector)
+            if score_mayor > mejor_score:
+                mejor_score, mejor_nombre = score_mayor, NOTAS[i]
+            if score_menor > mejor_score:
+                mejor_score, mejor_nombre = score_menor, f"{NOTAS[i]}m"
+        etiquetas.append(mejor_nombre)
+
+    # Una canción no cambia de acorde bloque a bloque: se suaviza con un
+    # filtro de moda (descarta blips de 1-2 bloques) y luego se descartan
+    # los cambios que no llegan a durar lo que dura un acorde real.
+    etiquetas = _suavizar_moda(etiquetas)
+
+    segmentos = []
+    for tiempo, nombre in zip(tiempos, etiquetas):
+        if segmentos and segmentos[-1][1] == nombre:
+            continue
+        segmentos.append((tiempo, nombre))
+
+    duracion_total = len(y) / sr
+    return _fusionar_cambios_breves(segmentos, duracion_total)
+
+
 def transponer_audio(ruta_entrada, semitonos, ruta_salida):
     y, sr = librosa.load(ruta_entrada, sr=None, mono=False)
     if y.ndim == 1:
@@ -60,7 +161,7 @@ def transponer_audio(ruta_entrada, semitonos, ruta_salida):
 class App(ttk.Window):
     def __init__(self):
         super().__init__(title="Transponer", themename="darkly", resizable=(False, False))
-        self.geometry("440x480")
+        self.geometry("440x640")
         self.ruta_archivo = None
         self.ruta_resultado = None
         self.tono_detectado_idx = None
@@ -94,7 +195,7 @@ class App(ttk.Window):
         )
         self.label_archivo.pack(side="left", padx=12)
 
-        frame_tono = ttk.Labelframe(main, text="Transposición", padding=14)
+        frame_tono = ttk.Labelframe(main, text="Herramientas", padding=14)
         frame_tono.pack(fill="x", pady=(0, 18))
 
         self.notebook = ttk.Notebook(frame_tono)
@@ -127,6 +228,34 @@ class App(ttk.Window):
             command=self._actualizar_label_semitonos,
             bootstyle="info",
         ).pack(fill="x", padx=4)
+
+        tab_acordes = ttk.Frame(self.notebook, padding=16)
+        self.notebook.add(tab_acordes, text="Acordes")
+        self.boton_acordes = ttk.Button(
+            tab_acordes,
+            text="Detectar acordes",
+            bootstyle="info-outline",
+            command=self._on_detectar_acordes,
+        )
+        self.boton_acordes.pack(anchor="w")
+        self.label_estado_acordes = ttk.Label(tab_acordes, text="", bootstyle="secondary")
+        self.label_estado_acordes.pack(anchor="w", pady=(8, 8))
+
+        frame_lista = ttk.Frame(tab_acordes)
+        frame_lista.pack(fill="both", expand=True)
+        self.lista_acordes = ttk.Treeview(
+            frame_lista, columns=("tiempo", "acorde"), show="headings", height=8
+        )
+        self.lista_acordes.heading("tiempo", text="Tiempo")
+        self.lista_acordes.heading("acorde", text="Acorde")
+        self.lista_acordes.column("tiempo", width=70, anchor="center")
+        self.lista_acordes.column("acorde", width=100, anchor="center")
+        scrollbar_acordes = ttk.Scrollbar(
+            frame_lista, orient="vertical", command=self.lista_acordes.yview
+        )
+        self.lista_acordes.configure(yscrollcommand=scrollbar_acordes.set)
+        self.lista_acordes.pack(side="left", fill="both", expand=True)
+        scrollbar_acordes.pack(side="right", fill="y")
 
         self.boton_transponer = ttk.Button(
             main,
@@ -196,6 +325,44 @@ class App(ttk.Window):
         self.label_tono_detectado.config(text="No se pudo detectar el tono", bootstyle="danger")
         messagebox.showerror("Error al detectar el tono", mensaje)
 
+    def _on_detectar_acordes(self):
+        if not self.ruta_archivo:
+            messagebox.showwarning("Falta archivo", "Primero elige un archivo de audio.")
+            return
+
+        self.boton_acordes.config(state="disabled")
+        self.lista_acordes.delete(*self.lista_acordes.get_children())
+        self.label_estado_acordes.config(
+            text="Detectando acordes... (puede tardar unos segundos)", bootstyle="info"
+        )
+        hilo = threading.Thread(
+            target=self._procesar_acordes, args=(self.ruta_archivo,), daemon=True
+        )
+        hilo.start()
+
+    def _procesar_acordes(self, ruta):
+        try:
+            segmentos = detectar_acordes(ruta)
+        except Exception as exc:
+            self.after(0, self._on_error_acordes, self._describir_error(exc))
+        else:
+            self.after(0, self._on_acordes_detectados, segmentos)
+
+    def _on_acordes_detectados(self, segmentos):
+        self.boton_acordes.config(state="normal")
+        self.label_estado_acordes.config(
+            text=f"{len(segmentos)} cambios de acorde detectados", bootstyle="success"
+        )
+        for tiempo, nombre in segmentos:
+            self.lista_acordes.insert("", "end", values=(formatear_tiempo(tiempo), nombre or "—"))
+
+    def _on_error_acordes(self, mensaje):
+        self.boton_acordes.config(state="normal")
+        self.label_estado_acordes.config(
+            text="No se pudieron detectar los acordes.", bootstyle="danger"
+        )
+        messagebox.showerror("Error al detectar acordes", mensaje)
+
     def _calcular_semitonos(self):
         if self.notebook.index(self.notebook.select()) == 0:
             if self.tono_detectado_idx is None:
@@ -225,7 +392,7 @@ class App(ttk.Window):
         base, _ext = os.path.splitext(os.path.basename(self.ruta_archivo))
         ruta_salida = filedialog.asksaveasfilename(
             title="Guardar audio transpuesto",
-            initialfile=f"{base}_transpuesto.wav",
+            initialfile=f"{base} {describir_semitonos(semitonos)}.wav",
             defaultextension=".wav",
             filetypes=[("WAV", "*.wav")],
         )
