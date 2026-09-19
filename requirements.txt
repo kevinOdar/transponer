@@ -2,3 +2,4 @@ librosa
 soundfile
 numpy
 ttkbootstrap
+yt-dlp

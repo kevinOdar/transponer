@@ -1,4 +1,5 @@
 import os
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -8,6 +9,9 @@ import librosa
 import numpy as np
 import soundfile as sf
 import ttkbootstrap as ttk
+import yt_dlp
+
+CARPETA_DESCARGAS = os.path.join(tempfile.gettempdir(), "transponer_descargas")
 
 NOTAS = ["DO", "DO#", "RE", "RE#", "MI", "FA", "FA#", "SOL", "SOL#", "LA", "LA#", "SI"]
 
@@ -147,6 +151,21 @@ def detectar_acordes(ruta, ventana=1.5):
     return _fusionar_cambios_breves(segmentos, duracion_total)
 
 
+def descargar_audio_youtube(url, carpeta=CARPETA_DESCARGAS):
+    os.makedirs(carpeta, exist_ok=True)
+    opciones = {
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "outtmpl": os.path.join(carpeta, "%(title)s.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "noprogress": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(opciones) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)
+
+
 def transponer_audio(ruta_entrada, semitonos, ruta_salida):
     y, sr = librosa.load(ruta_entrada, sr=None, mono=False)
     if y.ndim == 1:
@@ -160,8 +179,13 @@ def transponer_audio(ruta_entrada, semitonos, ruta_salida):
 
 class App(ttk.Window):
     def __init__(self):
-        super().__init__(title="Transponer", themename="darkly", resizable=(False, False))
-        self.geometry("440x640")
+        super().__init__(
+            title="Transponer",
+            themename="darkly",
+            resizable=(False, False),
+            iconphoto=os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"),
+        )
+        self.minsize(480, 0)
         self.ruta_archivo = None
         self.ruta_resultado = None
         self.tono_detectado_idx = None
@@ -184,16 +208,31 @@ class App(ttk.Window):
 
         frame_archivo = ttk.Labelframe(main, text="Archivo", padding=14)
         frame_archivo.pack(fill="x", pady=(0, 14))
+        fila_archivo = ttk.Frame(frame_archivo)
+        fila_archivo.pack(fill="x")
         ttk.Button(
-            frame_archivo,
+            fila_archivo,
             text="Elegir archivo...",
             bootstyle="primary",
             command=self._elegir_archivo,
         ).pack(side="left")
         self.label_archivo = ttk.Label(
-            frame_archivo, text="Ningún archivo seleccionado", bootstyle="secondary"
+            fila_archivo, text="Ningún archivo seleccionado", bootstyle="secondary"
         )
         self.label_archivo.pack(side="left", padx=12)
+
+        fila_youtube = ttk.Frame(frame_archivo)
+        fila_youtube.pack(fill="x", pady=(10, 0))
+        self.entry_youtube = ttk.Entry(fila_youtube)
+        self.entry_youtube.pack(side="left", fill="x", expand=True)
+        self.entry_youtube.bind("<Return>", lambda _e: self._on_descargar_youtube())
+        self.boton_youtube = ttk.Button(
+            fila_youtube,
+            text="Descargar de YouTube",
+            bootstyle="danger-outline",
+            command=self._on_descargar_youtube,
+        )
+        self.boton_youtube.pack(side="left", padx=(8, 0))
 
         frame_tono = ttk.Labelframe(main, text="Herramientas", padding=14)
         frame_tono.pack(fill="x", pady=(0, 18))
@@ -267,7 +306,7 @@ class App(ttk.Window):
 
         self.progress = ttk.Progressbar(main, mode="indeterminate", bootstyle="success-striped")
 
-        self.label_estado = ttk.Label(main, text="", bootstyle="secondary", wraplength=380)
+        self.label_estado = ttk.Label(main, text="", bootstyle="secondary", wraplength=420)
         self.label_estado.pack(fill="x", pady=(0, 8))
 
         self.boton_reproducir = ttk.Button(
@@ -291,12 +330,43 @@ class App(ttk.Window):
             ],
         )
         if ruta:
-            self.ruta_archivo = ruta
-            self.label_archivo.config(text=os.path.basename(ruta), bootstyle="default")
-            self.boton_reproducir.config(state="disabled")
-            self.ruta_resultado = None
-            self.label_estado.config(text="", bootstyle="secondary")
-            self._iniciar_deteccion_tono(ruta)
+            self._cargar_archivo(ruta)
+
+    def _cargar_archivo(self, ruta):
+        self.ruta_archivo = ruta
+        self.label_archivo.config(text=os.path.basename(ruta), bootstyle="default")
+        self.boton_reproducir.config(state="disabled")
+        self.ruta_resultado = None
+        self.label_estado.config(text="", bootstyle="secondary")
+        self._iniciar_deteccion_tono(ruta)
+
+    def _on_descargar_youtube(self):
+        url = self.entry_youtube.get().strip()
+        if not url:
+            messagebox.showwarning("Falta el link", "Pega primero un link de YouTube.")
+            return
+
+        self.boton_youtube.config(state="disabled")
+        self.label_archivo.config(text="Descargando de YouTube...", bootstyle="info")
+        hilo = threading.Thread(target=self._descargar_youtube, args=(url,), daemon=True)
+        hilo.start()
+
+    def _descargar_youtube(self, url):
+        try:
+            ruta = descargar_audio_youtube(url)
+        except Exception as exc:
+            self.after(0, self._on_error_youtube, self._describir_error(exc))
+        else:
+            self.after(0, self._on_youtube_descargado, ruta)
+
+    def _on_youtube_descargado(self, ruta):
+        self.boton_youtube.config(state="normal")
+        self._cargar_archivo(ruta)
+
+    def _on_error_youtube(self, mensaje):
+        self.boton_youtube.config(state="normal")
+        self.label_archivo.config(text="No se pudo descargar el video", bootstyle="danger")
+        messagebox.showerror("Error al descargar de YouTube", mensaje)
 
     def _iniciar_deteccion_tono(self, ruta):
         self.tono_detectado_idx = None
